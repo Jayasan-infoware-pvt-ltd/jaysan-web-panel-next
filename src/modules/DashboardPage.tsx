@@ -2,9 +2,11 @@
 import React, { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { formatCurrency, getStatusColor } from "@/lib/helpers";
-import { Card, CardBody, Button, Chip } from "@heroui/react";
-import { TrendingUp, Wallet, PiggyBank, Wrench, Infinity, Download, BarChart3, PieChart, ShoppingCart, CreditCard, MessageSquare } from "lucide-react";
+import { Card, CardBody, Button, Chip, Dropdown, DropdownTrigger, DropdownMenu, DropdownItem } from "@heroui/react";
+import { TrendingUp, Wallet, PiggyBank, Wrench, Infinity, Download, BarChart3, PieChart, ShoppingCart, CreditCard, MessageSquare, FileText, CheckCircle, Receipt } from "lucide-react";
 import { Chart, registerables } from "chart.js";
+import { jsPDF } from "jspdf";
+import "jspdf-autotable";
 
 Chart.register(...registerables);
 
@@ -15,6 +17,8 @@ interface DashboardPageProps {
 export default function DashboardPage({ onNavigate }: DashboardPageProps) {
   const [allTimeRevenue, setAllTimeRevenue] = useState(0);
   const [totalSales, setTotalSales] = useState(0);
+  const [totalCollected, setTotalCollected] = useState(0);
+  const [totalPending, setTotalPending] = useState(0);
   const [totalExp, setTotalExp] = useState(0);
   const [netProfit, setNetProfit] = useState(0);
   const [activeRepairs, setActiveRepairs] = useState(0);
@@ -70,6 +74,8 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
     }
 
     const sales = bills?.reduce((sum: number, b: any) => sum + (Number(b.total_amount) || 0), 0) || 0;
+    const collected = bills?.reduce((sum: number, b: any) => sum + (Number(b.paid_amount) || (b.payment_status === "Paid" ? Number(b.total_amount) : 0)), 0) || 0;
+    const pending = sales - collected;
     const exp = expenses?.reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0) || 0;
     const allTimeRev = allTimeBills?.reduce((sum: number, b: any) => sum + (Number(b.total_amount) || 0), 0) || 0;
 
@@ -81,6 +87,8 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
 
     setAllTimeRevenue(allTimeRev);
     setTotalSales(sales);
+    setTotalCollected(collected);
+    setTotalPending(pending);
     setTotalExp(exp);
     setNetProfit((sales - totalCOGS) - exp);
 
@@ -174,6 +182,90 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
     setRecentQueries(rq || []);
   }
 
+  async function downloadReport(type: "monthly" | "all-time") {
+    let q = supabase.from("bills").select("*").order("created_at", { ascending: false });
+    let eq = supabase.from("expenditures").select("*");
+    let title = "All-Time Sales & Collection Report";
+
+    if (type === "monthly") {
+      if (isAllTime) return alert("Please select a specific month first!");
+      const [year, month] = selectedMonth.split("-");
+      const startDate = new Date(+year, +month - 1, 1).toISOString();
+      const endDate = new Date(+year, +month, 0, 23, 59, 59, 999).toISOString();
+      q = q.gte("created_at", startDate).lte("created_at", endDate);
+      eq = eq.gte("created_at", startDate).lte("created_at", endDate);
+      title = `Sales Report - ${new Date(+year, +month - 1).toLocaleString('default', { month: 'long', year: 'numeric'})}`;
+    }
+    
+    const { data: reportBills } = await q;
+    const { data: reportExpenses } = await eq;
+    if (!reportBills || reportBills.length === 0) return alert("No invoices found for this report.");
+
+    const { data: products } = await supabase.from("products").select("id, cost_price");
+    const productMap = new Map((products || []).map((p: any) => [p.id, Number(p.cost_price) || 0]));
+    
+    let reportBillItems: any[] = [];
+    const billIds = reportBills.map(b => b.id);
+    const { data: items } = await supabase.from("bill_items").select("*").in("bill_id", billIds);
+    if (items) reportBillItems = items;
+
+    const doc = new jsPDF("p", "mm", "a4");
+    doc.setFillColor(15, 23, 42); doc.rect(0, 0, 210, 40, "F");
+    doc.setTextColor(255, 255, 255); doc.setFont(undefined as any, "bold"); doc.setFontSize(18);
+    doc.text("JRPL | Jaysan Resource (P) Ltd.", 14, 15);
+    doc.setFontSize(12); doc.setFont(undefined as any, "normal");
+    doc.text(title, 14, 25);
+    doc.setFontSize(10);
+    doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 32);
+
+    const tableData = reportBills.map((b, i) => [
+      i + 1, b.invoice_number || b.id.slice(0, 8), new Date(b.created_at).toLocaleDateString(),
+      b.customer_name || "Walk-in", b.payment_status || "Paid",
+      `INR ${b.total_amount?.toFixed(2)}`, `INR ${(b.paid_amount ?? b.total_amount)?.toFixed(2)}`,
+      `INR ${(b.total_amount - (b.paid_amount ?? b.total_amount)).toFixed(2)}`
+    ]);
+
+    const totalRevenue = reportBills.reduce((sum, b) => sum + (b.total_amount || 0), 0);
+    const totalPaid = reportBills.reduce((sum, b) => sum + (Number(b.paid_amount) || (b.payment_status === "Paid" ? Number(b.total_amount) : 0)), 0);
+    const totalPending = totalRevenue - totalPaid;
+    const totalCash = reportBills.reduce((sum, b) => sum + (b.cash_amount ?? (b.payment_method==="Cash" && b.payment_status==="Paid" ? b.total_amount : 0)), 0);
+    const totalOnline = reportBills.reduce((sum, b) => sum + (b.online_amount ?? (b.payment_method==="Online" && b.payment_status==="Paid" ? b.total_amount : 0)), 0);
+    const totalExp = reportExpenses?.reduce((sum, e) => sum + (Number(e.amount) || 0), 0) || 0;
+    
+    let totalCOGS = 0;
+    reportBillItems.forEach((item: any) => {
+      const currentCost = productMap.get(item.product_id) ?? Number(item.cost_at_sale) ?? 0;
+      totalCOGS += currentCost * (Number(item.quantity) || 1);
+    });
+    const netProfitVal = (totalRevenue - totalCOGS) - totalExp;
+
+    (doc as any).autoTable({
+      head: [["#", "Invoice No", "Date", "Customer", "Status", "Total", "Paid", "Balance"]],
+      body: tableData, startY: 45, theme: "plain", styles: { fontSize: 8, cellPadding: 2 },
+      headStyles: { fillColor: [248, 250, 252], textColor: [100, 116, 139], fontStyle: "bold", lineColor: [226, 232, 240], lineWidth: 0.1 },
+      bodyStyles: { textColor: [51, 65, 85], lineColor: [226, 232, 240], lineWidth: 0.1 },
+    });
+
+    let finalY = (doc as any).lastAutoTable.finalY + 15;
+    if (finalY > 250) { doc.addPage(); finalY = 20; }
+    doc.setFontSize(12); doc.setFont(undefined as any, "bold"); doc.setTextColor(15, 23, 42); doc.text("Report Summary", 14, finalY);
+    finalY += 8; doc.setFontSize(10); doc.setFont(undefined as any, "normal");
+    doc.text(`Total Invoices: ${reportBills.length}`, 14, finalY);
+    doc.text(`Total Expenditure: INR ${totalExp.toFixed(2)}`, 110, finalY);
+    finalY += 6;
+    doc.text(`Total Billing Value: INR ${totalRevenue.toFixed(2)}`, 14, finalY);
+    doc.text(`Total Actual Price: INR ${totalCOGS.toFixed(2)}`, 110, finalY);
+    finalY += 6;
+    doc.text(`Total Collected: INR ${totalPaid.toFixed(2)}`, 14, finalY);
+    doc.text(`Net Profit: INR ${netProfitVal.toFixed(2)}`, 110, finalY);
+    finalY += 6;
+    doc.text(`Total Pending Balance: INR ${totalPending.toFixed(2)}`, 14, finalY);
+    doc.text(`Total Cash: INR ${totalCash.toFixed(2)}`, 110, finalY);
+    finalY += 6;
+    doc.text(`Total Online: INR ${totalOnline.toFixed(2)}`, 110, finalY);
+    doc.save(`${title.replace(/ /g, "_")}.pdf`);
+  }
+
   const periodLabel = isAllTime ? "All Time" : new Date(selectedMonth + "-01").toLocaleString("default", { month: "short", year: "numeric" });
 
   const statCards = [
@@ -192,27 +284,36 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
           <h2 className="text-3xl font-bold text-slate-800 tracking-tight">Dashboard</h2>
           <p className="text-slate-500 text-sm mt-1">Overview of your business performance</p>
         </div>
-        <div className="flex items-center gap-2 bg-white p-1.5 rounded-xl border border-slate-200 shadow-sm">
-          <div className={`flex items-center gap-2 px-3 ${isAllTime ? "opacity-50 pointer-events-none" : ""}`}>
-            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Period</span>
-            <input
-              type="month"
-              value={selectedMonth}
-              onChange={(e) => { setSelectedMonth(e.target.value); setIsAllTime(false); }}
-              className="bg-slate-50 border-none text-sm font-medium text-slate-700 rounded px-2 py-1"
-              disabled={isAllTime}
-            />
+        <div className="flex items-center gap-2">
+          <Dropdown>
+            <DropdownTrigger><Button variant="flat" color="primary" startContent={<FileText className="w-4 h-4" />}>Download Report</Button></DropdownTrigger>
+            <DropdownMenu aria-label="Report Options">
+              <DropdownItem key="monthly" onPress={() => downloadReport("monthly")}>Monthly Report (PDF)</DropdownItem>
+              <DropdownItem key="alltime" onPress={() => downloadReport("all-time")}>All-Time Report (PDF)</DropdownItem>
+            </DropdownMenu>
+          </Dropdown>
+          <div className="flex items-center gap-2 bg-white p-1.5 rounded-xl border border-slate-200 shadow-sm">
+            <div className={`flex items-center gap-2 px-3 ${isAllTime ? "opacity-50 pointer-events-none" : ""}`}>
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Period</span>
+              <input
+                type="month"
+                value={selectedMonth}
+                onChange={(e) => { setSelectedMonth(e.target.value); setIsAllTime(false); }}
+                className="bg-slate-50 border-none text-sm font-medium text-slate-700 rounded px-2 py-1"
+                disabled={isAllTime}
+              />
+            </div>
+            <div className="w-px h-6 bg-slate-200" />
+            <Button
+              size="sm"
+              variant={isAllTime ? "solid" : "light"}
+              color={isAllTime ? "primary" : "default"}
+              onPress={() => setIsAllTime(!isAllTime)}
+              className="font-medium"
+            >
+              All Time
+            </Button>
           </div>
-          <div className="w-px h-6 bg-slate-200" />
-          <Button
-            size="sm"
-            variant={isAllTime ? "solid" : "light"}
-            color={isAllTime ? "primary" : "default"}
-            onPress={() => setIsAllTime(!isAllTime)}
-            className="font-medium"
-          >
-            All Time
-          </Button>
         </div>
       </div>
 

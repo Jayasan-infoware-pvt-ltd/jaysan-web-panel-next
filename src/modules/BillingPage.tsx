@@ -18,11 +18,13 @@ export default function BillingPage() {
   const [gstType, setGstType] = useState<"CGST" | "IGST">("CGST");
   const [custName, setCustName] = useState("");
   const [custPhone, setCustPhone] = useState("");
-  const [payMethod, setPayMethod] = useState<"Cash" | "Online">("Cash");
+  const [payMethod, setPayMethod] = useState<"Cash" | "Online" | "Split">("Cash");
   const [cashReceiver, setCashReceiver] = useState("");
   const [onlinePlatform, setOnlinePlatform] = useState("");
   const [txnId, setTxnId] = useState("");
-  const [payStatus, setPayStatus] = useState<"Paid" | "Pending">("Paid");
+  const [payStatus, setPayStatus] = useState<"Paid" | "Pending" | "Partially Paid">("Paid");
+  const [cashAmount, setCashAmount] = useState("");
+  const [onlineAmount, setOnlineAmount] = useState("");
   const [saving, setSaving] = useState(false);
   const [completedBill, setCompletedBill] = useState<any>(null);
   const [serialModalProduct, setSerialModalProduct] = useState<any>(null);
@@ -116,15 +118,28 @@ export default function BillingPage() {
     if (cart.length === 0) return alert("Cart is empty!");
     setSaving(true);
     try {
+      let cashAmt = 0; let onlineAmt = 0;
+      if (payStatus === "Paid") {
+        if (payMethod === "Cash") cashAmt = total;
+        else if (payMethod === "Online") onlineAmt = total;
+        else if (payMethod === "Split") { cashAmt = parseFloat(cashAmount) || 0; onlineAmt = parseFloat(onlineAmount) || 0; }
+      } else if (payStatus === "Partially Paid") {
+        if (payMethod === "Cash") cashAmt = parseFloat(cashAmount) || 0;
+        else if (payMethod === "Online") onlineAmt = parseFloat(onlineAmount) || 0;
+        else if (payMethod === "Split") { cashAmt = parseFloat(cashAmount) || 0; onlineAmt = parseFloat(onlineAmount) || 0; }
+      }
+      const paidAmt = payStatus !== "Pending" ? (cashAmt + onlineAmt) : 0;
+
       const invoiceNumber = `JRPL-${Date.now().toString(36).toUpperCase()}`;
       const { data: bill, error: billErr } = await supabase.from("bills").insert({
         invoice_number: invoiceNumber, customer_name: custName || "", customer_phone: custPhone,
         total_amount: total, gst_applied: gstEnabled, gst_type: gstType,
         payment_status: payStatus,
-        payment_method: payStatus === "Paid" ? payMethod : null,
-        cash_receiver: payStatus === "Paid" && payMethod === "Cash" ? cashReceiver : null,
-        online_platform: payStatus === "Paid" && payMethod === "Online" ? onlinePlatform : null,
-        transaction_id: payStatus === "Paid" && payMethod === "Online" ? txnId : null,
+        payment_method: payStatus === "Pending" ? null : payMethod,
+        cash_receiver: payStatus !== "Pending" && (payMethod === "Cash" || payMethod === "Split") ? cashReceiver : null,
+        online_platform: payStatus !== "Pending" && (payMethod === "Online" || payMethod === "Split") ? onlinePlatform : null,
+        transaction_id: payStatus !== "Pending" && (payMethod === "Online" || payMethod === "Split") ? txnId : null,
+        paid_amount: paidAmt, cash_amount: cashAmt, online_amount: onlineAmt,
       }).select().single();
       if (billErr) throw billErr;
 
@@ -134,6 +149,14 @@ export default function BillingPage() {
         serial_number: c.serial_number || null, problem: c.problem || null, part_name: c.part_name || null,
       }));
       await supabase.from("bill_items").insert(items);
+      
+      if (paidAmt > 0) {
+         await supabase.from("payment_transactions").insert({
+            bill_id: bill.id,
+            amount: paidAmt,
+            payment_method: payMethod === "Split" ? "Mixed" : payMethod
+         });
+      }
 
       // Deduct stock
       for (const c of cart) {
@@ -188,7 +211,11 @@ export default function BillingPage() {
     doc.setTextColor(15, 23, 42); doc.setFontSize(11);
     doc.text(new Date(b.created_at).toLocaleDateString(), 150, y + 6);
 
-    const tableData = (b.items || cart).map((item: any, i: number) => {
+    const itemsToPrint = b.items || cart;
+    const printSubtotal = itemsToPrint.reduce((sum: number, c: any) => sum + (c.price_at_sale * c.quantity), 0);
+    const printTotal = b.total_amount || (printSubtotal + (b.gst_applied || gstEnabled ? (b.gst_type === "CGST" || gstType === "CGST" ? printSubtotal * 0.18 : printSubtotal * 0.18) : 0));
+
+    const tableData = itemsToPrint.map((item: any, i: number) => {
       let desc = item.product_name;
       if (item.serial_number) desc += `\nSN: ${item.serial_number}`;
       if (item.problem) desc += `\nService: ${item.problem}`;
@@ -211,21 +238,36 @@ export default function BillingPage() {
     doc.setFontSize(10); doc.setTextColor(100, 116, 139);
     doc.text("Subtotal", xL, finY);
     doc.setTextColor(15, 23, 42);
-    doc.text(`INR ${subtotal.toFixed(2)}`, xR, finY, { align: "right" });
-    if (gstEnabled) {
-      if (gstType === "IGST") {
+    doc.text(`INR ${printSubtotal.toFixed(2)}`, xR, finY, { align: "right" });
+    
+    const isGstPrint = b.gst_applied !== undefined ? b.gst_applied : gstEnabled;
+    const gstTypePrint = b.gst_type || gstType;
+
+    if (isGstPrint) {
+      if (gstTypePrint === "IGST") {
         finY += 6; doc.setTextColor(100, 116, 139); doc.text("IGST (18%)", xL, finY);
-        doc.setTextColor(15, 23, 42); doc.text(`INR ${igst.toFixed(2)}`, xR, finY, { align: "right" });
+        doc.setTextColor(15, 23, 42); doc.text(`INR ${(printSubtotal * 0.18).toFixed(2)}`, xR, finY, { align: "right" });
       } else {
         finY += 6; doc.setTextColor(100, 116, 139); doc.text("CGST (9%)", xL, finY);
-        doc.setTextColor(15, 23, 42); doc.text(`INR ${cgst.toFixed(2)}`, xR, finY, { align: "right" });
+        doc.setTextColor(15, 23, 42); doc.text(`INR ${(printSubtotal * 0.09).toFixed(2)}`, xR, finY, { align: "right" });
         finY += 6; doc.setTextColor(100, 116, 139); doc.text("SGST (9%)", xL, finY);
-        doc.setTextColor(15, 23, 42); doc.text(`INR ${sgst.toFixed(2)}`, xR, finY, { align: "right" });
+        doc.setTextColor(15, 23, 42); doc.text(`INR ${(printSubtotal * 0.09).toFixed(2)}`, xR, finY, { align: "right" });
       }
     }
     doc.setDrawColor(226, 232, 240); doc.line(130, finY + 6, 195, finY + 6);
     doc.setFontSize(14); doc.setFont(undefined as any, "bold");
-    doc.text("Total", xL, finY + 16); doc.text(`INR ${total.toFixed(2)}`, xR, finY + 16, { align: "right" });
+    doc.text("Total", xL, finY + 16); doc.text(`INR ${printTotal.toFixed(2)}`, xR, finY + 16, { align: "right" });
+
+    let finalY = finY + 16;
+    if (b.payment_status === "Partially Paid" || b.payment_status === "Pending") {
+      finalY += 8;
+      doc.setFontSize(10); doc.setFont(undefined as any, "normal");
+      doc.setTextColor(100, 116, 139); doc.text("Paid Amount", xL, finalY);
+      doc.setTextColor(22, 163, 74); doc.text(`INR ${(b.paid_amount || 0).toFixed(2)}`, xR, finalY, { align: "right" });
+      finalY += 6;
+      doc.setTextColor(100, 116, 139); doc.text("Remaining Balance", xL, finalY);
+      doc.setTextColor(220, 38, 38); doc.text(`INR ${(printTotal - (b.paid_amount || 0)).toFixed(2)}`, xR, finalY, { align: "right" });
+    }
 
     const pH = doc.internal.pageSize.height;
     doc.setFontSize(8); doc.setTextColor(148, 163, 184);
@@ -371,17 +413,33 @@ export default function BillingPage() {
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-3">
               <div className="flex gap-3">
                 <label className="flex items-center gap-2"><input type="radio" checked={payStatus === "Paid"} onChange={() => setPayStatus("Paid")} /><span className="text-sm font-medium">Paid</span></label>
+                <label className="flex items-center gap-2"><input type="radio" checked={payStatus === "Partially Paid"} onChange={() => setPayStatus("Partially Paid")} /><span className="text-sm font-medium">Partially Paid</span></label>
                 <label className="flex items-center gap-2"><input type="radio" checked={payStatus === "Pending"} onChange={() => setPayStatus("Pending")} /><span className="text-sm font-medium">Pending</span></label>
               </div>
-              {payStatus === "Paid" && <>
+              {payStatus !== "Pending" && <>
                 <div className="flex gap-3">
                   <label className="flex items-center gap-2"><input type="radio" checked={payMethod === "Cash"} onChange={() => setPayMethod("Cash")} /><span className="text-xs">Cash</span></label>
                   <label className="flex items-center gap-2"><input type="radio" checked={payMethod === "Online"} onChange={() => setPayMethod("Online")} /><span className="text-xs">Online</span></label>
+                  <label className="flex items-center gap-2"><input type="radio" checked={payMethod === "Split"} onChange={() => setPayMethod("Split")} /><span className="text-xs">Split</span></label>
                 </div>
-                {payMethod === "Cash" && <Input label="Received By" value={cashReceiver} onValueChange={setCashReceiver} variant="bordered" size="sm" />}
-                {payMethod === "Online" && (
+
+                {(payStatus === "Partially Paid" || payMethod === "Split") && (
+                   <div className="grid grid-cols-2 gap-3">
+                     {(payMethod === "Cash" || payMethod === "Split") && <Input type="number" label="Cash Amt" value={cashAmount} onValueChange={setCashAmount} variant="bordered" size="sm" />}
+                     {(payMethod === "Online" || payMethod === "Split") && <Input type="number" label="Online Amt" value={onlineAmount} onValueChange={setOnlineAmount} variant="bordered" size="sm" />}
+                   </div>
+                )}
+                
+                {payStatus === "Partially Paid" && (
+                   <div className="text-xs font-bold text-slate-600 mt-2 bg-white px-3 py-2 rounded-lg border border-slate-200">
+                       Remaining Balance: <span className="text-red-500">₹{(total - ((parseFloat(cashAmount)||0) + (parseFloat(onlineAmount)||0))).toFixed(2)}</span>
+                   </div>
+                )}
+
+                {(payMethod === "Cash" || payMethod === "Split") && <Input label="Received By" value={cashReceiver} onValueChange={setCashReceiver} variant="bordered" size="sm" />}
+                {(payMethod === "Online" || payMethod === "Split") && (
                   <div className="space-y-2">
-                    <select value={onlinePlatform} onChange={e => setOnlinePlatform(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm">
+                    <select value={onlinePlatform} onChange={e => setOnlinePlatform(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
                       <option value="">Select Platform</option>
                       <option value="GPay">GPay</option><option value="PhonePe">PhonePe</option>
                       <option value="Paytm">Paytm</option><option value="Bank Transfer">Bank Transfer</option>
@@ -420,7 +478,7 @@ export default function BillingPage() {
           <ModalHeader>Select Serial Number</ModalHeader>
           <ModalBody className="p-4 space-y-2">
             <p className="text-sm text-slate-500">Please choose a serial number for <b>{serialModalProduct?.name}</b></p>
-            <div className="max-h-60 overflow-y-auto space-y-1">
+            <div className="max-h-60 overflow-y-auto space-y-1 block pr-2 custom-scrollbar" style={{ scrollbarWidth: "thin", scrollbarColor: "#cbd5e1 transparent" }}>
               <button onClick={() => finishAddToCart(serialModalProduct, "")} className="w-full text-left px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-lg">No Serial (Skip)</button>
               {serialModalProduct?.serials?.map((sn: string, i: number) => (
                 <button key={i} onClick={() => finishAddToCart(serialModalProduct, sn)} className="w-full text-left px-3 py-2 text-sm bg-blue-50 hover:bg-blue-100 text-blue-800 rounded-lg font-mono">
