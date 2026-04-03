@@ -254,14 +254,12 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
     doc.text(`Total Expenditure: INR ${totalExp.toFixed(2)}`, 110, finalY);
     finalY += 6;
     doc.text(`Total Billing Value: INR ${totalRevenue.toFixed(2)}`, 14, finalY);
-    doc.text(`Total Actual Price: INR ${totalCOGS.toFixed(2)}`, 110, finalY);
-    finalY += 6;
-    doc.text(`Total Collected: INR ${totalPaid.toFixed(2)}`, 14, finalY);
     doc.text(`Net Profit: INR ${netProfitVal.toFixed(2)}`, 110, finalY);
     finalY += 6;
-    doc.text(`Total Pending Balance: INR ${totalPending.toFixed(2)}`, 14, finalY);
+    doc.text(`Total Collected: INR ${totalPaid.toFixed(2)}`, 14, finalY);
     doc.text(`Total Cash: INR ${totalCash.toFixed(2)}`, 110, finalY);
     finalY += 6;
+    doc.text(`Total Pending Balance: INR ${totalPending.toFixed(2)}`, 14, finalY);
     doc.text(`Total Online: INR ${totalOnline.toFixed(2)}`, 110, finalY);
     doc.save(`${title.replace(/ /g, "_")}.pdf`);
   }
